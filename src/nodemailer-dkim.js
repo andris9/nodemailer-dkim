@@ -105,6 +105,10 @@ DKIMSigner.prototype.write = function(buf) {
         if (buf.length > offset) {
             buf = buf.slice(offset + 1);
         }
+		// Check for LF line endings and convert to CRLF if necessary
+		if (line[line.length - 2] !== 0x0d) {
+			line = Buffer.concat([line.slice(0, line.length - 1), new Buffer("\r\n")], line.length + 1);
+		}
         // Look for CRLF
         if (line.length === 2 && line[0] === 0x0d && line[1] === 0x0a) {
             // Look for end of headers marker
