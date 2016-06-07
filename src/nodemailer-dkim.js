@@ -1,63 +1,191 @@
 'use strict';
 
-var dkimSign = require("dkim-signer").DKIMSign;
-var Transform = require('stream').Transform;
-var util = require('util');
-var dns = require('dns');
+// Code is heavily influenced by Haraka: https://github.com/haraka/Haraka/blob/master/plugins/dkim_sign.js
+
+var Stream = require('stream').Stream;
 var crypto = require('crypto');
+var util = require('util');
 var punycode = require('punycode');
 
-/**
- * Nodemailer plugin for the 'stream' event. Caches the entire message to memory,
- * signes it and passes on
- *
- * @param {Object} options DKIM options
- * @returns {Function} handler for 'stream'
- */
-module.exports.signer = function(options) {
-    return function(mail, callback) {
-        mail.message.transform(function() {
-            return new DKIMSigner(options);
-        });
-        setImmediate(callback);
-    };
+function indexOfLF(buf, maxlength) {
+    for (var i = 0; i < buf.length; i++) {
+        if (maxlength && (i === maxlength)) break;
+        if (buf[i] === 0x0a) return i;
+    }
+    return -1;
 };
 
-module.exports.verifyKeys = verifyKeys;
+function parseHeader(line) {
+	var m = /^([^:]+):\s*((?:.|[\r\n])*)$/.exec(line);
+	if (!m) return null;
+	var keyValue = {};
+	var key = m[1].toLowerCase();
+	var value = m[2].trim();
+	value = value.replace(/\r\n([\t ]+)/g, "$1");
+	value = value.replace(/[\t ]+/g, ' ');
+	value = value.replace(/[\t ]+(\r?\n)$/, "$1");
+	keyValue[key] = value;
+	return keyValue;
+}
 
-// Expose for testing only
-module.exports.DKIMSigner = DKIMSigner;
-
-/**
- * Creates a Transform stream for signing messages
- *
- * @constructor
- * @param {Object} options DKIM options
- */
 function DKIMSigner(options) {
     this.options = options || {};
-    Transform.call(this, this.options);
+    Stream.call(this);
 
-    this._message = '';
+	this.writable = true;
+	this.readble = true;
+
+	this.callback = options.callback;
+	this.message = options.message;
+    this.domain = options.domainName;
+    this.selector = options.keySelector;
+    this.privKey = options.privateKey;
+	this.headers_to_sign = [
+		'from',
+		'sender',
+		'reply-to',
+		'subject',
+		'to',
+		'cc',
+		'mime-version',
+		'content-type',
+		'content-transfer-encoding',
+		'content-id',
+		'content-description',
+		'resent-date',
+		'resent-from',
+		'resent-sender',
+		'resent-to',
+		'resent-cc',
+		'resent-message-id',
+		'in-reply-to',
+		'references',
+		'list-id',
+		'list-help',
+		'list-unsubscribe',
+		'list-subscribe',
+		'list-post',
+		'list-owner',
+		'list-archive'
+	];
+    this.headers = [];
+	this.signed_headers = [];
+
+    this.found_eoh = false;
+    this.buffer = {
+        ar: [],
+        len: 0
+    };
+    this.line_buffer = {
+        ar: [],
+        len: 0
+    };
+    this.hash = crypto.createHash('SHA256');
+    this.signer = crypto.createSign('RSA-SHA256');
 }
-util.inherits(DKIMSigner, Transform);
+util.inherits(DKIMSigner, Stream);
 
-/**
- * Caches all input
- */
-DKIMSigner.prototype._transform = function(chunk, encoding, done) {
-    chunk = (chunk || '').toString('utf-8');
-    this._message += chunk;
-    done();
+DKIMSigner.prototype.write = function(buf) {
+	this.emit('data', buf);
+    // Merge in any partial data from last iteration
+    if (this.buffer.ar.length) {
+        this.buffer.ar.push(buf);
+        this.buffer.len += buf.length;
+        var nb = Buffer.concat(this.buffer.ar, this.buffer.len);
+        buf = nb;
+        this.buffer = {
+            ar: [],
+            len: 0
+        };
+    }
+    var offset = 0;
+	var keyValue = null;
+    while ((offset = indexOfLF(buf)) !== -1) {
+        var line = buf.slice(0, offset + 1);
+        if (buf.length > offset) {
+            buf = buf.slice(offset + 1);
+        }
+        // Look for CRLF
+        if (line.length === 2 && line[0] === 0x0d && line[1] === 0x0a) {
+            // Look for end of headers marker
+            if (!this.found_eoh) {
+                this.found_eoh = true;
+            } else {
+                // Store any empty lines so that we can discard
+                // any trailing CRLFs at the end of the message
+                this.line_buffer.ar.push(line);
+                this.line_buffer.len += line.length;
+            }
+        } else {
+            if (!this.found_eoh) {
+				if (line[0] === 0x20 || line[0] === 0x09) {
+					// Header continuation
+					this.headers[this.headers.length - 1] += line.toString('utf-8');
+				} else {
+					this.headers.push(line.toString('utf-8'));
+				}
+				continue;
+			}
+            if (this.line_buffer.ar.length) {
+                // We need to process the buffered CRLFs
+                var lb = Buffer.concat(this.line_buffer.ar, this.line_buffer.len);
+                this.line_buffer = {
+                    ar: [],
+                    len: 0
+                };
+                this.hash.update(lb);
+            }
+            this.hash.update(line);
+        }
+    }
+    if (buf.length) {
+        // We have partial data...
+        this.buffer.ar.push(buf);
+        this.buffer.len += buf.length;
+    }
+	return true;
 };
 
-/**
- * Signs and emits the entire cached input at once
- */
-DKIMSigner.prototype._flush = function(done) {
-    var signature = dkimSign(this._message, this.options);
-    this.push(new Buffer([].concat(signature || []).concat(this._message || []).join('\r\n'), 'utf-8'));
-    done();
+DKIMSigner.prototype.end = function() {
+    if (this.buffer.ar.length) {
+        this.buffer.ar.push(new Buffer("\r\n"));
+        this.buffer.len += 2;
+        var le = Buffer.concat(this.buffer.ar, this.buffer.len);
+        this.hash.update(le);
+        this.buffer = {
+            ar: [],
+            len: 0
+        };
+    }
+	var bodyhash = this.hash.digest('base64');
+
+	var key;
+	var value;
+	var keyValue;
+	var line;
+	for (var i = 0, len = this.headers.length; i < len; i++) {
+		line = this.headers[i];
+		keyValue = parseHeader(line);
+		key = Object.keys(keyValue)[0];
+		value = keyValue[key];
+		if (this.headers_to_sign.indexOf(key) !== -1) {
+			this.signer.update(key + ':' + value + "\r\n");
+			this.signed_headers.push(key);
+		}
+	}
+	var dkim_header = 'v=1;a=rsa-sha256;bh=' + bodyhash +
+                      ';c=relaxed/simple;d=' + this.domain +
+                      ';h=' + this.signed_headers.join(':') +
+                      ';s=' + this.selector +
+                      ';b=';
+    this.signer.update('dkim-signature:' + dkim_header);
+	var signature = this.signer.sign(this.privKey, 'base64');
+	dkim_header += signature;
+	this.message.addHeader({
+		'DKIM-Signature': dkim_header
+	})
+	this.callback();
+	this.emit('end');
 };
 
 /**
@@ -108,3 +236,15 @@ function verifyKeys(options, callback) {
         }
     });
 }
+
+module.exports.signer = function(options) {
+    return function(mail, callback) {
+		options.message = mail.message;
+		options.callback = callback;
+		var stream = mail.message.createReadStream();
+		var sign = new DKIMSigner(options);
+		stream.pipe(sign);
+    };
+};
+
+module.exports.verifyKeys = verifyKeys;
