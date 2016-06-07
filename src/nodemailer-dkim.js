@@ -5,19 +5,26 @@
 var Stream = require('stream').Stream;
 var crypto = require('crypto');
 var util = require('util');
+var dns = require('dns');
 var punycode = require('punycode');
 
 function indexOfLF(buf, maxlength) {
     for (var i = 0; i < buf.length; i++) {
-        if (maxlength && (i === maxlength)) break;
-        if (buf[i] === 0x0a) return i;
+        if (maxlength && (i === maxlength)) {
+			break;
+		}
+        if (buf[i] === 0x0a) {
+			return i;
+		}
     }
     return -1;
-};
+}
 
 function parseHeader(line) {
 	var m = /^([^:]+):\s*((?:.|[\r\n])*)$/.exec(line);
-	if (!m) return null;
+	if (!m) {
+		return null;
+	}
 	var keyValue = {};
 	var key = m[1].toLowerCase();
 	var value = m[2].trim();
@@ -99,7 +106,6 @@ DKIMSigner.prototype.write = function(buf) {
         };
     }
     var offset = 0;
-	var keyValue = null;
     while ((offset = indexOfLF(buf)) !== -1) {
         var line = buf.slice(0, offset + 1);
         if (buf.length > offset) {
@@ -187,7 +193,7 @@ DKIMSigner.prototype.end = function() {
 	dkim_header += signature;
 	this.message.addHeader({
 		'DKIM-Signature': dkim_header
-	})
+	});
 	this.callback();
 	this.emit('end');
 };
