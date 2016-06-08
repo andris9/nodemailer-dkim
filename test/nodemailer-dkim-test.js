@@ -1,7 +1,10 @@
 'use strict';
 
 var chai = require('chai');
+var stubTransport = require('nodemailer-stub-transport');
 var dkim = require('../src/nodemailer-dkim');
+var nodemailer = require('nodemailer');
+var transport = nodemailer.createTransport(stubTransport());
 var fs = require('fs');
 var sinon = require('sinon');
 
@@ -10,33 +13,24 @@ chai.Assertion.includeStack = true;
 
 describe('nodemailer-dkim tests', function() {
     it('should add valid signature', function(done) {
-        var mail = 'From: andris@node.ee\r\nTo:andris@kreata.ee\r\n\r\nHello world!';
-
-        var signer = new dkim.DKIMSigner({
+		transport.use('stream', dkim.signer({
             domainName: 'node.ee',
             keySelector: 'dkim',
             privateKey: fs.readFileSync(__dirname + '/fixtures/test_private.pem')
-        });
+        }));
 
-        var chunks = [];
-
-        signer.on('data', function(chunk) {
-            chunks.push(chunk);
-        });
-
-        signer.on('end', function() {
-            // unwrap all lines
-            var message = Buffer.concat(chunks).toString('utf-8').replace(/\r?\n +/g, ' ');
-            // normalize first line by removing spaces
-            message = message.replace(/^.*$/m, function(str) {
-                return str.replace(/ /g, '');
-            });
-            expect(message).to.exist;
-            expect(message).to.equal('DKIM-Signature:v=1;a=rsa-sha256;c=relaxed/relaxed;d=node.ee;q=dns/txt;s=dkim;bh=z6TUz85EdYrACGMHYgZhJGvVy5oQI0dooVMKa2ZT7c4=;h=from:to;b=pVd+Dp+EjmYBcc1AWlBAP4ESpuAJ2WMS4gbxWLoeUZ1vZRodVN7K9UXvcCsLuqjJktCZMN2+8dyEUaYW2VIcxg4sVBCS1wqB/tqYZ/gxXLnG2/nZf4fyD2vxltJP4pDL\r\n' + mail);
-            done();
-        });
-
-        signer.end(mail);
+		transport.sendMail({
+			from: 'andris@node.ee',
+			to: 'andris@kreata.ee',
+			subject: 'Test',
+			html: '<p>Hello World!</p>\n',
+			date: Date(1465345157 * 1000)
+		}, function(err, info){
+			var raw = info.response.toString();
+			if (raw.indexOf('v=1;a=rsa-sha256;bh=lzycLjmx+7cNnIDxD6kePwIkOs3o748Ts3L460RwrNE=;c=relaxed/simple;d=node.ee;h=content-type:from:to:subject:content-transfer-encoding:mime-version;s=dkim;b=KtGiOCvtbdch2AHBPaCFZUPx1aHA8k9xeZrmrikDBOsPzyrLDwFC1VQwf9kKLDlvGX2wPdMU0w5xD9tL1si/jljIRZPjJFlH/sUlaXAsjjxPUCILTnz/ulbvF5gWwyuL') !== -1) {
+				done();
+			}
+		});
     });
 
     it('should verify valid keys', function(done) {
