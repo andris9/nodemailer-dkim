@@ -247,7 +247,7 @@ function verifyKeys(options, callback) {
     });
 }
 
-module.exports.signer = function(options) {
+module.exports.DKIMSigner = module.exports.signer = function(options) {
     return function(mail, callback) {
 		options.message = mail.message;
 		options.callback = callback;
